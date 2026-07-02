@@ -1,0 +1,27 @@
+GDAL DEMProcessingOptions Signature:
+(options=None, colorFilename=None, format=None, creationOptions=None, computeEdges=False, alg=None, band=1, zFactor=None, scale=None, xscale=None, yscale=None, azimuth=None, altitude=None, combined=False, multiDirectional=False, igor=False, slopeFormat=None, trigonometric=False, zeroForFlat=False, addAlpha=None, colorSelection=None, callback=None, callback_data=None)
+
+Parameters:
+ - options: default=None
+ - colorFilename: default=None
+ - format: default=None
+ - creationOptions: default=None
+ - computeEdges: default=False
+ - alg: default=None
+ - band: default=1
+ - zFactor: default=None
+ - scale: default=None
+ - xscale: default=None
+ - yscale: default=None
+ - azimuth: default=None
+ - altitude: default=None
+ - combined: default=False
+ - multiDirectional: default=False
+ - igor: default=False
+ - slopeFormat: default=None
+ - trigonometric: default=False
+ - zeroForFlat: default=False
+ - addAlpha: default=None
+ - colorSelection: default=None
+ - callback: default=None
+ - callback_data: default=None

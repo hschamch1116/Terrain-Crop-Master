@@ -1,4 +1,4 @@
-import os
+import os, tempfile
 from qgis.utils import iface
 from qgis.gui import QgsMapToolEmitPoint
 from qgis.core import (
@@ -9,57 +9,336 @@ from qgis.core import (
 )
 from PyQt5.QtWidgets import (QInputDialog, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QLabel, QAction, QMessageBox, QFileDialog, QDialog, QComboBox, QProgressBar,
-                             QLineEdit, QGridLayout, QShortcut, QCheckBox)
-from PyQt5.QtGui import QColor, QImage, QPainter, QKeySequence
-from PyQt5.QtCore import Qt, QCoreApplication, QSize
+                             QLineEdit, QGridLayout, QShortcut, QCheckBox, QSlider)
+from PyQt5.QtGui import QColor, QImage, QPainter, QKeySequence, QPixmap
+from PyQt5.QtCore import Qt, QCoreApplication, QSize, QTimer
 from osgeo import gdal
 
 class ResolutionSelectDialog(QDialog):
-    """ 최상위 레이어 팝업 포커스를 유지하는 해상도 및 포맷 선택창 """
-    def __init__(self, default_idx=1, parent=None):
+    """ 최상위 레이어 팝업 포커스를 유지하며, 실시간 음영기복도 미리보기를 제공하는 설정창 """
+    def __init__(self, default_idx=1, parent=None, bbox=None, dem_layer=None):
         super(ResolutionSelectDialog, self).__init__(parent)
         self.selected_value = "4096"
         self.dem_format = "BT"
+        self.bbox = bbox
+        self.dem_layer = dem_layer
+        
+        # 음영 기복 파라미터 기본값
+        self.altitude = 45.0
+        self.azimuth = 315.0
+        self.z_factor = 1.0
+        
+        # 디바운싱용 타이머 탑재 (200ms 지연 렌더링)
+        self.preview_timer = QTimer(self)
+        self.preview_timer.setSingleShot(True)
+        self.preview_timer.timeout.connect(self.update_preview)
+        
         self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
         self.setWindowModality(Qt.ApplicationModal)
-        self.resize(280, 160)
         self.init_ui(default_idx)
         
     def init_ui(self, default_idx):
         self.setWindowTitle("내보내기 설정")
-        layout = QVBoxLayout()
         
-        lbl = QLabel("내보낼 지형의 수평 픽셀(해상도) 크기를 선택하세요:", self)
-        layout.addWidget(lbl)
+        # 메인 레이아웃 (수평 배치로 좌측 설정 / 우측 미리보기 분할)
+        self.main_layout = QHBoxLayout()
+        
+        # 1. 좌측 설정 판넬
+        left_widget = QWidget(self)
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        
+        lbl = QLabel("내보낼 지형의 수평 픽셀(해상도) 크기:", self)
+        lbl.setStyleSheet("font-weight: bold;")
+        left_layout.addWidget(lbl)
         
         self.combo = QComboBox(self)
         self.presets = ["2048", "4096", "8192", "직접 입력..."]
         self.combo.addItems(self.presets)
         self.combo.setCurrentIndex(default_idx)
-        layout.addWidget(self.combo)
+        left_layout.addWidget(self.combo)
         
-        # DEM 출력 포맷 선택 추가
         lbl_format = QLabel("DEM (고도 데이터) 출력 포맷:", self)
-        lbl_format.setStyleSheet("margin-top: 5px; font-weight: bold;")
-        layout.addWidget(lbl_format)
+        lbl_format.setStyleSheet("margin-top: 8px; font-weight: bold;")
+        left_layout.addWidget(lbl_format)
         
         self.combo_format = QComboBox(self)
         self.combo_format.addItems(["CryEngine (.bt)", "GeoTIFF (.tif)", "다중방향 음영기복도 (.tif)"])
         self.combo_format.setCurrentIndex(0)
-        layout.addWidget(self.combo_format)
+        self.combo_format.currentIndexChanged.connect(self.toggle_hillshade_options)
+        left_layout.addWidget(self.combo_format)
         
+        # 1-1. 음영기복도 전용 수치 조절 영역 (기본 숨김)
+        self.hillshade_options_widget = QWidget(self)
+        hs_layout = QVBoxLayout(self.hillshade_options_widget)
+        hs_layout.setContentsMargins(0, 5, 0, 0)
+        
+        # 다중방향 토글 체크박스 (기본: 다중방향 사용)
+        self.cb_multidirectional = QCheckBox("다중방향 광원 음영 (Multidirectional)", self)
+        self.cb_multidirectional.setChecked(True)
+        self.cb_multidirectional.toggled.connect(self.toggle_multidirectional)
+        hs_layout.addWidget(self.cb_multidirectional)
+        
+        # 고도각 조절 (Altitude: 0 ~ 90)
+        lbl_alt = QLabel("음영 고도각 (Altitude: 0 ~ 90°):", self)
+        lbl_alt.setStyleSheet("margin-top: 5px;")
+        self.txt_altitude = QLineEdit("45.0", self)
+        self.txt_altitude.setFixedWidth(50)
+        
+        self.slider_altitude = QSlider(Qt.Horizontal, self)
+        self.slider_altitude.setRange(0, 90)
+        self.slider_altitude.setValue(45)
+        
+        alt_header_layout = QHBoxLayout()
+        alt_header_layout.addWidget(lbl_alt)
+        alt_header_layout.addStretch()
+        alt_header_layout.addWidget(self.txt_altitude)
+        hs_layout.addLayout(alt_header_layout)
+        hs_layout.addWidget(self.slider_altitude)
+        
+        # 방위각 조절 영역 컨테이너화 (다중방향 시 동적 감춤 처리용)
+        self.azimuth_container_widget = QWidget(self)
+        azi_layout = QVBoxLayout(self.azimuth_container_widget)
+        azi_layout.setContentsMargins(0, 0, 0, 0)
+        
+        lbl_azi = QLabel("음영 방위각 (Azimuth: 0 ~ 360°):", self)
+        lbl_azi.setStyleSheet("margin-top: 5px;")
+        self.txt_azimuth = QLineEdit("315.0", self)
+        self.txt_azimuth.setFixedWidth(50)
+        
+        self.slider_azimuth = QSlider(Qt.Horizontal, self)
+        self.slider_azimuth.setRange(0, 360)
+        self.slider_azimuth.setValue(315)
+        
+        azi_header_layout = QHBoxLayout()
+        azi_header_layout.addWidget(lbl_azi)
+        azi_header_layout.addStretch()
+        azi_header_layout.addWidget(self.txt_azimuth)
+        
+        azi_layout.addLayout(azi_header_layout)
+        azi_layout.addWidget(self.slider_azimuth)
+        hs_layout.addWidget(self.azimuth_container_widget)
+        
+        # Z 척도 조절 (Z Factor: 0.1 ~ 5.0)
+        lbl_z = QLabel("Z축 스케일 배율 (Z Factor: 0.1 ~ 5.0):", self)
+        lbl_z.setStyleSheet("margin-top: 5px;")
+        self.txt_z_factor = QLineEdit("1.0", self)
+        self.txt_z_factor.setFixedWidth(50)
+        
+        self.slider_z_factor = QSlider(Qt.Horizontal, self)
+        self.slider_z_factor.setRange(1, 50)  # 10으로 나눠서 0.1~5.0 범위 매핑
+        self.slider_z_factor.setValue(10)
+        
+        z_header_layout = QHBoxLayout()
+        z_header_layout.addWidget(lbl_z)
+        z_header_layout.addStretch()
+        z_header_layout.addWidget(self.txt_z_factor)
+        hs_layout.addLayout(z_header_layout)
+        hs_layout.addWidget(self.slider_z_factor)
+        
+        left_layout.addWidget(self.hillshade_options_widget)
+        self.hillshade_options_widget.hide()
+        
+        # 하단 버튼부
         btn_layout = QHBoxLayout()
         btn_ok = QPushButton("확인", self)
+        btn_ok.setStyleSheet("background-color: #3182ce; color: white; font-weight: bold; height: 28px;")
         btn_ok.clicked.connect(self.on_accept)
         btn_cancel = QPushButton("취소", self)
+        btn_cancel.setStyleSheet("height: 28px;")
         btn_cancel.clicked.connect(self.reject)
         
         btn_layout.addWidget(btn_ok)
         btn_layout.addWidget(btn_cancel)
-        layout.addLayout(btn_layout)
+        left_layout.addLayout(btn_layout)
         
-        self.setLayout(layout)
+        self.main_layout.addWidget(left_widget)
         
+        # 2. 우측 미리보기 판넬 (기본 숨김)
+        self.preview_widget = QWidget(self)
+        right_layout = QVBoxLayout(self.preview_widget)
+        right_layout.setContentsMargins(5, 0, 0, 0)
+        
+        lbl_preview_title = QLabel("실시간 미리보기 (256x256)", self)
+        lbl_preview_title.setStyleSheet("font-weight: bold; color: #4a5568;")
+        lbl_preview_title.setAlignment(Qt.AlignCenter)
+        right_layout.addWidget(lbl_preview_title)
+        
+        self.lbl_preview = QLabel(self)
+        self.lbl_preview.setFixedSize(256, 256)
+        self.lbl_preview.setStyleSheet("background-color: #edf2f7; border: 1px solid #cbd5e0; border-radius: 4px;")
+        self.lbl_preview.setAlignment(Qt.AlignCenter)
+        
+        # 빈 가이드 텍스트 장착
+        self.lbl_preview.setText("DEM 레이어 없음\n(미리보기 불가)")
+        right_layout.addWidget(self.lbl_preview)
+        
+        self.main_layout.addWidget(self.preview_widget)
+        self.preview_widget.hide()
+        
+        self.setLayout(self.main_layout)
+        self.resize(300, 160)
+        
+        # 시그널 바인딩 및 슬롯 동기화
+        self.slider_altitude.valueChanged.connect(self.sync_slider_to_txt_alt)
+        self.slider_azimuth.valueChanged.connect(self.sync_slider_to_txt_azi)
+        self.slider_z_factor.valueChanged.connect(self.sync_slider_to_txt_z)
+        
+        self.txt_altitude.editingFinished.connect(self.sync_txt_to_slider_alt)
+        self.txt_azimuth.editingFinished.connect(self.sync_txt_to_slider_azi)
+        self.txt_z_factor.editingFinished.connect(self.sync_txt_to_slider_z)
+        
+        # 초기 다중방향 체크 상태이므로 방위각 조절 위젯을 기본적으로 숨김
+        self.azimuth_container_widget.hide()
+        
+    def toggle_hillshade_options(self, index):
+        if index == 2:
+            self.hillshade_options_widget.show()
+            self.preview_widget.show()
+            self.resize(580, 390)
+            self.preview_timer.start(50)  # 지연 가동
+        else:
+            self.hillshade_options_widget.hide()
+            self.preview_widget.hide()
+            self.resize(300, 160)
+            
+    def toggle_multidirectional(self, checked):
+        # 다중방향 음영 시 방위각 설정 영역 숨김 (사용자 시각적 명확성 확보)
+        self.azimuth_container_widget.setVisible(not checked)
+        self.preview_timer.start(200)
+        
+    def sync_slider_to_txt_alt(self, val):
+        self.txt_altitude.setText(f"{val:.1f}")
+        self.altitude = float(val)
+        self.preview_timer.start(200)  # 디바운싱 렌더링 호출
+        
+    def sync_slider_to_txt_azi(self, val):
+        self.txt_azimuth.setText(f"{val:.1f}")
+        self.azimuth = float(val)
+        self.preview_timer.start(200)  # 디바운싱 렌더링 호출
+        
+    def sync_slider_to_txt_z(self, val):
+        z_val = val / 10.0
+        self.txt_z_factor.setText(f"{z_val:.1f}")
+        self.z_factor = z_val
+        self.preview_timer.start(200)  # 디바운싱 렌더링 호출
+        
+    def sync_txt_to_slider_alt(self):
+        try:
+            val = float(self.txt_altitude.text())
+            val = max(0.0, min(90.0, val))
+            self.txt_altitude.setText(f"{val:.1f}")
+            self.altitude = val
+            self.slider_altitude.blockSignals(True)
+            self.slider_altitude.setValue(int(val))
+            self.slider_altitude.blockSignals(False)
+            self.preview_timer.start(200)
+        except ValueError:
+            self.txt_altitude.setText(f"{self.slider_altitude.value():.1f}")
+            
+    def sync_txt_to_slider_azi(self):
+        try:
+            val = float(self.txt_azimuth.text())
+            val = max(0.0, min(360.0, val))
+            self.txt_azimuth.setText(f"{val:.1f}")
+            self.azimuth = val
+            self.slider_azimuth.blockSignals(True)
+            self.slider_azimuth.setValue(int(val))
+            self.slider_azimuth.blockSignals(False)
+            self.preview_timer.start(200)
+        except ValueError:
+            self.txt_azimuth.setText(f"{self.slider_azimuth.value():.1f}")
+            
+    def sync_txt_to_slider_z(self):
+        try:
+            val = float(self.txt_z_factor.text())
+            val = max(0.1, min(5.0, val))
+            self.txt_z_factor.setText(f"{val:.1f}")
+            self.z_factor = val
+            self.slider_z_factor.blockSignals(True)
+            self.slider_z_factor.setValue(int(val * 10))
+            self.slider_z_factor.blockSignals(False)
+            self.preview_timer.start(200)
+        except ValueError:
+            self.txt_z_factor.setText(f"{(self.slider_z_factor.value() / 10.0):.1f}")
+            
+    def update_preview(self):
+
+        if not self.dem_layer or not self.bbox:
+            self.lbl_preview.setText("DEM 레이어 또는\n지형 영역이 유효하지 않음")
+            return
+            
+        try:
+            source_path = self.dem_layer.source()
+            if not os.path.exists(source_path):
+                if hasattr(self.dem_layer, 'dataProvider') and hasattr(self.dem_layer.dataProvider(), 'dataSourceUri'):
+                    source_path = self.dem_layer.dataProvider().dataSourceUri().split("|")[0]
+                    
+            # 1. 256x256 크기 Warp 추출 (프로젝트 좌표계 재투영 강제 주입)
+            dest_crs = iface.mapCanvas().mapSettings().destinationCrs()
+            warp_opts = gdal.WarpOptions(
+                format="GTiff",
+                outputBounds=[self.bbox.xMinimum(), self.bbox.yMinimum(), self.bbox.xMaximum(), self.bbox.yMaximum()],
+                width=256,
+                height=256,
+                resampleAlg=gdal.GRA_Bilinear,
+                dstSRS=dest_crs.toWkt(),  # 대상 좌표계 강제 매칭
+                cropToCutline=False
+            )
+            # 가상 메모리 파일에 Warp 작성
+            warp_ds = gdal.Warp("/vsimem/preview_dem.tif", source_path, options=warp_opts)
+            if warp_ds is None:
+                self.lbl_preview.setText("Warp 연산 실패")
+                return
+                
+            # 2. CRS 스케일 환산 및 gdal.DEMProcessing 수행
+            is_multi = self.cb_multidirectional.isChecked()
+            scale_val = 1.0
+            if dest_crs.isGeographic():
+                scale_val = 111120.0
+                
+            opts_dict = {
+                "format": "GTiff",
+                "alg": "zevenbergenThorne",
+                "computeEdges": True,
+                "zFactor": self.z_factor,
+                "scale": scale_val,
+                "altitude": self.altitude
+            }
+            if is_multi:
+                opts_dict["multiDirectional"] = True
+            else:
+                opts_dict["azimuth"] = self.azimuth
+                
+            dem_opts = gdal.DEMProcessingOptions(**opts_dict)
+            
+            # 가상 메모리 파일에 직접 다중방향 음영 연산
+            ds_shade = gdal.DEMProcessing("/vsimem/preview_shade.tif", warp_ds, "hillshade", options=dem_opts)
+            warp_ds = None  # 해제
+            gdal.Unlink("/vsimem/preview_dem.tif")  # 가상 메모리 DEM 청소
+            
+            # 3. 생성된 음영 메모리 밴드를 QImage로 변환해 화면에 렌더링
+            if ds_shade is not None:
+                band = ds_shade.GetRasterBand(1)
+                if band:
+                    data_bytes = band.ReadRaster(0, 0, 256, 256, buf_type=gdal.GDT_Byte)
+                    ds_shade = None
+                    gdal.Unlink("/vsimem/preview_shade.tif")  # 가상 메모리 Shade 청소
+                    
+                    qimg = QImage(data_bytes, 256, 256, QImage.Format_Grayscale8)
+                    self.lbl_preview.setPixmap(QPixmap.fromImage(qimg))
+                
+        except Exception as err:
+            self.lbl_preview.setText(f"미리보기 연산 에러:\n{str(err)[:50]}")
+            print(f"❌ Preview render failure: {str(err)}")
+            try:
+                if os.path.exists(temp_dem):
+                    os.remove(temp_dem)
+                if os.path.exists(temp_shade):
+                    os.remove(temp_shade)
+            except:
+                pass
+            
     def on_accept(self):
         self.selected_value = self.combo.currentText()
         if self.combo_format.currentIndex() == 0:
@@ -68,6 +347,15 @@ class ResolutionSelectDialog(QDialog):
             self.dem_format = "GTiff"
         else:
             self.dem_format = "Hillshade"
+            
+        try:
+            self.altitude = float(self.txt_altitude.text())
+            self.azimuth = float(self.txt_azimuth.text())
+            self.z_factor = float(self.txt_z_factor.text())
+        except ValueError:
+            QMessageBox.critical(self, "오류", "고도각, 방위각, Z척도 값은 실수 형식이어야 합니다.")
+            return
+            
         self.accept()
 
 class MultiSizeSelectDialog(QDialog):
@@ -263,7 +551,8 @@ class R16ConversionDialog(QDialog):
 
             # 1단계: gdal.Warp를 이용한 시계방향 90도 회전
             warp_options = gdal.WarpOptions(
-                creationOptions=["FORCE_ORIENTATION=CW"]
+                creationOptions=["FORCE_ORIENTATION=CW"],
+                resampleAlg=gdal.GRA_Bilinear
             )
             gdal.Warp(temp_tif, input_file, options=warp_options)
 
@@ -900,13 +1189,28 @@ class TerrainEditController(QWidget):
             return
         bbox = features[0].geometry().boundingBox()
 
+        # 래스터 레이어 목록 중 DEM 레이어가 있는지 색출
+        dem_layer = None
+        for l in target_layers:
+            if isinstance(l, QgsRasterLayer):
+                layer_name = l.name().lower()
+                is_dem_temp = (len([rl for rl in target_layers if isinstance(rl, QgsRasterLayer)]) == 1) or any(
+                    k in layer_name for k in [
+                        "dem", "dsm", "dtm", "height", "높이", "수치표고", 
+                        "vworld_dem", "elevation", "지형", "고도", "terrain", "grid"
+                    ]
+                )
+                if is_dem_temp:
+                    dem_layer = l
+                    break
+
         resolution_presets = ["2048", "4096", "8192", "직접 입력..."]
         idx = 1
         for i, preset in enumerate(resolution_presets):
             if preset in self.size_label:
                 idx = i
                 break
-        diag = ResolutionSelectDialog(default_idx=idx, parent=self)
+        diag = ResolutionSelectDialog(default_idx=idx, parent=self, bbox=bbox, dem_layer=dem_layer)
         if not diag.exec_(): return
         
         selected_item = diag.selected_value
@@ -1016,46 +1320,63 @@ class TerrainEditController(QWidget):
                         QCoreApplication.processEvents()
                         return 1
 
+                    dest_crs = iface.mapCanvas().mapSettings().destinationCrs()
+                    resample_alg = gdal.GRA_Bilinear if is_dem else gdal.GRA_NearestNeighbour
                     warp_options = gdal.WarpOptions(
                         format=gdal_format,
                         outputBounds=[bbox.xMinimum(), bbox.yMinimum(), bbox.xMaximum(), bbox.yMaximum()],
                         width=pixel_size,   
                         height=pixel_size,  
                         cropToCutline=False,
+                        resampleAlg=resample_alg,
+                        dstSRS=dest_crs.toWkt(),  # 대상 좌표계 재투영 강제 주입
                         callback=sub_callback
                     )
                     
                     if is_dem and dem_format == "Hillshade":
-                        # 임시 DEM 파일에 먼저 Crop 수행
-                        temp_dem_path = out_path + ".temp.tif"
-                        warp_ds = gdal.Warp(temp_dem_path, source_path, options=warp_options)
-                        if warp_ds is not None:
-                            warp_ds = None # 명시적으로 닫아 파일 락 해제
+                        # 1. 임시 DEM 메모리 로드
+                        warp_ds = gdal.Warp("/vsimem/export_dem.tif", source_path, options=warp_options)
                         
-                        # 음영기복도(다중방향) 처리 적용
-                        print(f"ℹ️ {target_layer.name()} 다중방향 음영기복도 생성 시작 (고도: 45, Z척도: 1, 다중방향)...")
-                        ds_shade = gdal.DEMProcessing(
-                            out_path, temp_dem_path, "hillshade", 
-                            altitude=45.0, 
-                            zFactor=1.0, 
-                            multiDirectional=True
-                        )
-                        if ds_shade is not None:
-                            ds_shade = None # 명시적으로 닫아 디스크에 최종 기록 완료
+                        # 2. 다중방향 음영 연산 수행
+                        is_multi = diag.cb_multidirectional.isChecked()
+                        print(f"ℹ️ {target_layer.name()} 음영기복도 생성 시작 (고도: {diag.altitude}, 방위각: {diag.azimuth if not is_multi else 'N/A'}, Z척도: {diag.z_factor}, 다중방향: {is_multi})...")
+                        scale_val = 1.0
+                        if dest_crs.isGeographic():
+                            scale_val = 111120.0
+                            
+                        opts_dict = {
+                            "format": "GTiff",  # 파일로 최종 저장
+                            "alg": "zevenbergenThorne",
+                            "computeEdges": True,
+                            "zFactor": diag.z_factor,
+                            "scale": scale_val,
+                            "altitude": diag.altitude
+                        }
+                        if is_multi:
+                            opts_dict["multiDirectional"] = True
+                        else:
+                            opts_dict["azimuth"] = diag.azimuth
+                            
+                        dem_opts = gdal.DEMProcessingOptions(**opts_dict)
                         
-                        # 임시 파일들 정리
-                        try:
-                            os.remove(temp_dem_path)
-                            if os.path.exists(temp_dem_path + ".aux.xml"):
-                                os.remove(temp_dem_path + ".aux.xml")
-                        except Exception as e:
-                            print(f"⚠️ 임시 파일 삭제 실패: {str(e)}")
+                        # 파일 쓰기
+                        ds_shade = gdal.DEMProcessing(out_path, warp_ds, "hillshade", options=dem_opts)
+                        ds_shade = None  # 저장 완료
+                        warp_ds = None   # 메모리 해제
+                        gdal.Unlink("/vsimem/export_dem.tif")  # 가상 메모리 DEM 청소
                     else:
                         warp_ds = gdal.Warp(out_path, source_path, options=warp_options)
                         if warp_ds is not None:
                             warp_ds = None
                         
-                    iface.addRasterLayer(out_path, os.path.basename(out_path))
+                    added_layer = iface.addRasterLayer(out_path, os.path.basename(out_path))
+                    if added_layer and added_layer.isValid() and is_dem and dem_format == "Hillshade":
+                        renderer = added_layer.renderer()
+                        if renderer and renderer.type() == 'singlebandgray':
+                            ce = renderer.contrastEnhancement()
+                            if ce:
+                                ce.setContrastEnhancementAlgorithm(ce.NoEnhancement)
+                            added_layer.triggerRepaint()
                     success_count += 1
                     if is_dem:
                         exported_dem_path = out_path
