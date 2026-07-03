@@ -5,12 +5,12 @@ from qgis.core import (
     QgsProject, QgsVectorLayer, QgsFeature, 
     QgsGeometry, QgsRectangle, QgsSimpleFillSymbolLayer, QgsVectorFileWriter, 
     QgsRasterLayer, QgsCoordinateTransformContext, QgsCoordinateTransform,
-    QgsWkbTypes, QgsMapSettings, QgsMapRendererCustomPainterJob
+    QgsWkbTypes, QgsMapSettings, QgsMapRendererCustomPainterJob, QgsHillshadeRenderer
 )
 from PyQt5.QtWidgets import (QInputDialog, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QLabel, QAction, QMessageBox, QFileDialog, QDialog, QComboBox, QProgressBar,
                              QLineEdit, QGridLayout, QShortcut, QCheckBox, QSlider)
-from PyQt5.QtGui import QColor, QImage, QPainter, QKeySequence, QPixmap
+from PyQt5.QtGui import QColor, QImage, QPainter, QKeySequence, QPixmap, QIcon
 from PyQt5.QtCore import Qt, QCoreApplication, QSize, QTimer
 from osgeo import gdal
 
@@ -20,6 +20,7 @@ class ResolutionSelectDialog(QDialog):
         super(ResolutionSelectDialog, self).__init__(parent)
         self.selected_value = "4096"
         self.dem_format = "BT"
+        self.color_format = "GTiff"  # 기본 위성/벡터 포맷
         self.bbox = bbox
         self.dem_layer = dem_layer
         
@@ -67,6 +68,15 @@ class ResolutionSelectDialog(QDialog):
         self.combo_format.setCurrentIndex(0)
         self.combo_format.currentIndexChanged.connect(self.toggle_hillshade_options)
         left_layout.addWidget(self.combo_format)
+        
+        lbl_color_format = QLabel("위성 및 벡터 레이어 출력 포맷:", self)
+        lbl_color_format.setStyleSheet("margin-top: 8px; font-weight: bold;")
+        left_layout.addWidget(lbl_color_format)
+        
+        self.combo_color_format = QComboBox(self)
+        self.combo_color_format.addItems(["GeoTIFF (.tif)", "Windows BMP (.bmp)"])
+        self.combo_color_format.setCurrentIndex(0)
+        left_layout.addWidget(self.combo_color_format)
         
         # 1-1. 음영기복도 전용 수치 조절 영역 (기본 숨김)
         self.hillshade_options_widget = QWidget(self)
@@ -177,7 +187,7 @@ class ResolutionSelectDialog(QDialog):
         self.preview_widget.hide()
         
         self.setLayout(self.main_layout)
-        self.resize(300, 160)
+        self.resize(300, 220)
         
         # 시그널 바인딩 및 슬롯 동기화
         self.slider_altitude.valueChanged.connect(self.sync_slider_to_txt_alt)
@@ -195,12 +205,12 @@ class ResolutionSelectDialog(QDialog):
         if index == 2:
             self.hillshade_options_widget.show()
             self.preview_widget.show()
-            self.resize(580, 390)
+            self.resize(580, 430)
             self.preview_timer.start(50)  # 지연 가동
         else:
             self.hillshade_options_widget.hide()
             self.preview_widget.hide()
-            self.resize(300, 160)
+            self.resize(300, 220)
             
     def toggle_multidirectional(self, checked):
         # 다중방향 음영 시 방위각 설정 영역 숨김 (사용자 시각적 명확성 확보)
@@ -269,75 +279,49 @@ class ResolutionSelectDialog(QDialog):
             return
             
         try:
-            source_path = self.dem_layer.source()
-            if not os.path.exists(source_path):
-                if hasattr(self.dem_layer, 'dataProvider') and hasattr(self.dem_layer.dataProvider(), 'dataSourceUri'):
-                    source_path = self.dem_layer.dataProvider().dataSourceUri().split("|")[0]
-                    
-            # 1. 256x256 크기 Warp 추출 (프로젝트 좌표계 재투영 강제 주입)
-            dest_crs = iface.mapCanvas().mapSettings().destinationCrs()
-            warp_opts = gdal.WarpOptions(
-                format="GTiff",
-                outputBounds=[self.bbox.xMinimum(), self.bbox.yMinimum(), self.bbox.xMaximum(), self.bbox.yMaximum()],
-                width=256,
-                height=256,
-                resampleAlg=gdal.GRA_Bilinear,
-                dstSRS=dest_crs.toWkt(),  # 대상 좌표계 강제 매칭
-                cropToCutline=False
-            )
-            # 가상 메모리 파일에 Warp 작성
-            warp_ds = gdal.Warp("/vsimem/preview_dem.tif", source_path, options=warp_opts)
-            if warp_ds is None:
-                self.lbl_preview.setText("Warp 연산 실패")
-                return
+            # 1. 임시 레이어 복제 및 힐쉐이드 렌더러 설정
+            try:
+                render_layer = self.dem_layer.clone()
+            except:
+                render_layer = QgsRasterLayer(self.dem_layer.source(), self.dem_layer.name() + "_temp")
                 
-            # 2. CRS 스케일 환산 및 gdal.DEMProcessing 수행
+            provider = render_layer.dataProvider()
             is_multi = self.cb_multidirectional.isChecked()
-            scale_val = 1.0
-            if dest_crs.isGeographic():
-                scale_val = 111120.0
-                
-            opts_dict = {
-                "format": "GTiff",
-                "alg": "zevenbergenThorne",
-                "computeEdges": True,
-                "zFactor": self.z_factor,
-                "scale": scale_val,
-                "altitude": self.altitude
-            }
-            if is_multi:
-                opts_dict["multiDirectional"] = True
-            else:
-                opts_dict["azimuth"] = self.azimuth
-                
-            dem_opts = gdal.DEMProcessingOptions(**opts_dict)
             
-            # 가상 메모리 파일에 직접 다중방향 음영 연산
-            ds_shade = gdal.DEMProcessing("/vsimem/preview_shade.tif", warp_ds, "hillshade", options=dem_opts)
-            warp_ds = None  # 해제
-            gdal.Unlink("/vsimem/preview_dem.tif")  # 가상 메모리 DEM 청소
+            hillshade_renderer = QgsHillshadeRenderer(
+                provider,
+                1, # band 1
+                self.azimuth if not is_multi else 315.0,
+                self.altitude
+            )
+            hillshade_renderer.setZFactor(self.z_factor)
+            hillshade_renderer.setMultiDirectional(is_multi)
+            render_layer.setRenderer(hillshade_renderer)
             
-            # 3. 생성된 음영 메모리 밴드를 QImage로 변환해 화면에 렌더링
-            if ds_shade is not None:
-                band = ds_shade.GetRasterBand(1)
-                if band:
-                    data_bytes = band.ReadRaster(0, 0, 256, 256, buf_type=gdal.GDT_Byte)
-                    ds_shade = None
-                    gdal.Unlink("/vsimem/preview_shade.tif")  # 가상 메모리 Shade 청소
-                    
-                    qimg = QImage(data_bytes, 256, 256, QImage.Format_Grayscale8)
-                    self.lbl_preview.setPixmap(QPixmap.fromImage(qimg))
+            # 2. QImage 스냅샷 렌더링
+            image = QImage(QSize(256, 256), QImage.Format_ARGB32_Premultiplied)
+            image.fill(Qt.transparent)
+            
+            painter = QPainter(image)
+            
+            settings = QgsMapSettings()
+            settings.setLayers([render_layer])
+            settings.setExtent(self.bbox)
+            settings.setOutputSize(QSize(256, 256))
+            settings.setDestinationCrs(iface.mapCanvas().mapSettings().destinationCrs())
+            settings.setBackgroundColor(QColor(237, 242, 247))
+            
+            job = QgsMapRendererCustomPainterJob(settings, painter)
+            job.start()
+            job.waitForFinished()
+            painter.end()
+            
+            # 3. 미리보기 화면에 즉시 로드
+            self.lbl_preview.setPixmap(QPixmap.fromImage(image))
                 
         except Exception as err:
             self.lbl_preview.setText(f"미리보기 연산 에러:\n{str(err)[:50]}")
             print(f"❌ Preview render failure: {str(err)}")
-            try:
-                if os.path.exists(temp_dem):
-                    os.remove(temp_dem)
-                if os.path.exists(temp_shade):
-                    os.remove(temp_shade)
-            except:
-                pass
             
     def on_accept(self):
         self.selected_value = self.combo.currentText()
@@ -347,6 +331,8 @@ class ResolutionSelectDialog(QDialog):
             self.dem_format = "GTiff"
         else:
             self.dem_format = "Hillshade"
+            
+        self.color_format = "GTiff" if self.combo_color_format.currentIndex() == 0 else "BMP"
             
         try:
             self.altitude = float(self.txt_altitude.text())
@@ -419,17 +405,17 @@ class MultiSizeSelectDialog(QDialog):
             
         self.accept()
 
-class R16ConversionDialog(QDialog):
-    """ 크라이엔진용 R16 변환기 다이얼로그 """
+class RawConversionDialog(QDialog):
+    """ 크라이엔진용 RAW 변환기 다이얼로그 """
     def __init__(self, parent=None, default_input=""):
-        super(R16ConversionDialog, self).__init__(parent)
+        super(RawConversionDialog, self).__init__(parent)
         self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
         self.setWindowModality(Qt.ApplicationModal)
         self.resize(550, 250)
         self.init_ui(default_input)
 
     def init_ui(self, default_input):
-        self.setWindowTitle("CryEngine R16 Converter")
+        self.setWindowTitle("CryEngine RAW Converter")
         
         layout = QVBoxLayout()
         grid = QGridLayout()
@@ -447,11 +433,8 @@ class R16ConversionDialog(QDialog):
         grid.addWidget(btn_browse_input, 0, 2)
         
         # 출력 파일 레이아웃
-        lbl_output = QLabel("출력 R16 파일 (.r16):", self)
+        lbl_output = QLabel("출력 RAW 파일 (.raw):", self)
         self.txt_output = QLineEdit(self)
-        if default_input:
-            base, _ = os.path.splitext(default_input)
-            self.txt_output.setText(base + "_terrain.r16")
         btn_browse_output = QPushButton("찾아보기", self)
         btn_browse_output.clicked.connect(self.browse_output)
         
@@ -497,6 +480,11 @@ class R16ConversionDialog(QDialog):
         
         self.setLayout(layout)
         
+        # 실시간 파일명 업데이트 시그널 바인딩
+        self.txt_min_height.textChanged.connect(self.update_output_filename)
+        self.txt_max_height.textChanged.connect(self.update_output_filename)
+        self.txt_input.textChanged.connect(self.update_output_filename)
+        
         if default_input:
             self.auto_detect_heights(default_input)
 
@@ -506,13 +494,11 @@ class R16ConversionDialog(QDialog):
         )
         if file_path:
             self.txt_input.setText(file_path)
-            base, _ = os.path.splitext(file_path)
-            self.txt_output.setText(base + "_terrain.r16")
             self.auto_detect_heights(file_path)
 
     def browse_output(self):
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "출력 파일 저장 위치 지정", "", "CryEngine Raw 16bit (*.r16);;Raw Binary (*.raw)"
+            self, "출력 파일 저장 위치 지정", "", "CryEngine Raw (*.raw);;All Files (*)"
         )
         if file_path:
             self.txt_output.setText(file_path)
@@ -526,10 +512,36 @@ class R16ConversionDialog(QDialog):
                 band = dataset.GetRasterBand(1)
                 if band:
                     min_val, max_val = band.ComputeRasterMinMax(True)
+                    self.txt_min_height.blockSignals(True)
+                    self.txt_max_height.blockSignals(True)
                     self.txt_min_height.setText(f"{min_val:.2f}")
                     self.txt_max_height.setText(f"{max_val:.2f}")
+                    self.txt_min_height.blockSignals(False)
+                    self.txt_max_height.blockSignals(False)
+                    self.update_output_filename()
         except Exception as e:
             print(f"Failed to auto-detect min/max heights: {str(e)}")
+
+    def update_output_filename(self):
+        input_file = self.txt_input.text()
+        if not input_file:
+            return
+        try:
+            min_val = float(self.txt_min_height.text())
+            max_val = float(self.txt_max_height.text())
+            diff = (max_val - min_val) * 2.0
+            if diff.is_integer():
+                diff_str = f"{int(diff)}"
+            else:
+                diff_str = f"{diff:.1f}"
+        except ValueError:
+            diff_str = ""
+            
+        base, _ = os.path.splitext(input_file)
+        if diff_str:
+            self.txt_output.setText(f"{base}_terrain_{diff_str}.raw")
+        else:
+            self.txt_output.setText(f"{base}_terrain.raw")
 
     def run_conversion(self):
         input_file = self.txt_input.text()
@@ -633,7 +645,7 @@ class TerrainEditController(QWidget):
     def init_ui(self):
         self.setWindowTitle("지형 박스 제어 센터")
         self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
-        self.resize(280, 450)
+        self.resize(280, 500)
         
         # QSS 테마 스타일시트 주입
         self.setStyleSheet("""
@@ -646,6 +658,16 @@ class TerrainEditController(QWidget):
             QLabel {
                 font-weight: 500;
                 color: #4a5568;
+            }
+            QLineEdit {
+                background-color: #ffffff;
+                border: 1px solid #cbd5e0;
+                border-radius: 4px;
+                padding: 4px 8px;
+                min-height: 25px;
+            }
+            QLineEdit:focus {
+                border-color: #3182ce;
             }
             QComboBox {
                 background-color: #ffffff;
@@ -774,6 +796,16 @@ class TerrainEditController(QWidget):
         self.lbl_status.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.lbl_status)
         
+        # 구글맵 링크 이동 입력창 추가
+        lbl_gmaps = QLabel("🔗 구글맵 링크로 화면 이동:", self)
+        lbl_gmaps.setStyleSheet("font-weight: bold; margin-top: 5px;")
+        layout.addWidget(lbl_gmaps)
+        
+        self.txt_gmaps_link = QLineEdit(self)
+        self.txt_gmaps_link.setPlaceholderText("구글맵 주소 붙여넣고 엔터(이동)...")
+        self.txt_gmaps_link.returnPressed.connect(self.navigate_to_gmaps_link)
+        layout.addWidget(self.txt_gmaps_link)
+        
         # 새 지형 박스 생성 버튼
         self.btn_create_box = QPushButton("➕ 새 크롭 박스(영역) 생성", self)
         self.btn_create_box.setObjectName("btn_create_box")
@@ -811,10 +843,10 @@ class TerrainEditController(QWidget):
         self.btn_export.clicked.connect(lambda: self.export_multiple_layers(manual_only=False))
         layout.addWidget(self.btn_export)
         
-        self.btn_convert_r16 = QPushButton("🎮 크라이엔진용 R16 변환기", self)
-        self.btn_convert_r16.setObjectName("btn_convert_r16")
-        self.btn_convert_r16.clicked.connect(self.open_r16_converter)
-        layout.addWidget(self.btn_convert_r16)
+        self.btn_convert_raw = QPushButton("🎮 크라이엔진용 RAW 변환기", self)
+        self.btn_convert_raw.setObjectName("btn_convert_raw")
+        self.btn_convert_raw.clicked.connect(self.open_raw_converter)
+        layout.addWidget(self.btn_convert_raw)
         
         self.progress_label = QLabel("저장 대기 중...", self)
         layout.addWidget(self.progress_label)
@@ -839,7 +871,7 @@ class TerrainEditController(QWidget):
         self.btn_save_scratch.setToolTip("레이어 패널에서 선택한 임시 메모리 레이어(.gpkg/.shp)를 영구 저장 및 교체합니다. (원래 스타일/라벨 유지) (Ctrl+S)")
         self.btn_manual_export.setToolTip("레이어 패널에서 내가 직접 선택한 래스터/벡터 레이어들을 현재 설정된 영역대로 크롭 내보내기합니다.")
         self.btn_export.setToolTip("프로젝트 내의 DEM과 위성/항공사진을 찾아 현재 사각 영역 크기에 맞춰 원터치 일괄 내보내기합니다.")
-        self.btn_convert_r16.setToolTip("지형 고도 데이터를 크라이엔진(CryEngine) 전용 Raw 16bit(.r16) 규격으로 변환합니다.")
+        self.btn_convert_raw.setToolTip("지형 고도 데이터를 크라이엔진(CryEngine) 전용 RAW (.raw) 규격으로 변환합니다.")
 
         # 단축키 설정 및 바인딩
         self.shortcut_edit = QShortcut(QKeySequence("Ctrl+E"), self)
@@ -1154,6 +1186,181 @@ class TerrainEditController(QWidget):
                 self.btn_save_scratch.setText("💾 선택한 임시 레이어 저장")
         except Exception as e:
             print(f"⚠️ 임시 레이어 상태 업데이트 에러: {str(e)}")
+            
+    def parse_google_maps_url(self, url):
+        import re
+        # Pattern 1: @lat,lng (most common)
+        match = re.search(r'@([0-9.-]+),([0-9.-]+)', url)
+        if match:
+            try:
+                return float(match.group(1)), float(match.group(2))
+            except ValueError:
+                pass
+                
+        # Pattern 2: q=lat,lng or query=lat,lng or ll=lat,lng
+        match = re.search(r'[?&](?:q|query|ll)=([0-9.-]+),([0-9.-]+)', url)
+        if match:
+            try:
+                return float(match.group(1)), float(match.group(2))
+            except ValueError:
+                pass
+                
+        # Pattern 3: general fallback for any two numbers separated by comma
+        # e.g., 37.566535, 126.977969
+        match = re.search(r'([0-9.-]+)\s*,\s*([0-9.-]+)', url)
+        if match:
+            try:
+                val1 = float(match.group(1))
+                val2 = float(match.group(2))
+                if -90 <= val1 <= 90 and -180 <= val2 <= 180:
+                    return val1, val2
+                elif -90 <= val2 <= 90 and -180 <= val1 <= 180:
+                    return val2, val1
+            except ValueError:
+                pass
+                
+        return None
+
+    def navigate_to_gmaps_link(self):
+        url = self.txt_gmaps_link.text().strip()
+        if not url:
+            return
+            
+        coords = self.parse_google_maps_url(url)
+        if not coords:
+            QMessageBox.warning(self, "이동 실패", "유효한 구글맵 링크 또는 좌표(위도, 경도) 형식이 아닙니다.")
+            return
+            
+        lat, lng = coords
+        
+        # QGIS 캔버스의 대상 CRS 확인
+        canvas = iface.mapCanvas()
+        dest_crs = canvas.mapSettings().destinationCrs()
+        
+        # WGS 84 (EPSG:4326) 포인트 생성
+        from qgis.core import QgsPointXY, QgsCoordinateReferenceSystem, QgsCoordinateTransform
+        src_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+        
+        # Google Maps coordinates are (lat, lng). In QGIS, QgsPointXY takes (x, y) which is (lng, lat)
+        point_wgs = QgsPointXY(lng, lat)
+        
+        # 좌표계 변환 수행
+        transform = QgsCoordinateTransform(src_crs, dest_crs, QgsProject.instance())
+        try:
+            point_transformed = transform.transform(point_wgs)
+            canvas.setCenter(point_transformed)
+            canvas.refresh()
+            self.lbl_status.setText(f"📍 좌표로 이동 완료: {lat:.5f}, {lng:.5f}")
+            self.txt_gmaps_link.clear()
+            
+            # 구글맵 핀 레이어 생성 및 갱신
+            pin_layer = None
+            for layer in QgsProject.instance().mapLayers().values():
+                if layer.name() == "GoogleMaps_Pin":
+                    pin_layer = layer
+                    break
+                    
+            from qgis.core import QgsVectorLayer, QgsFeature, QgsGeometry
+            if not pin_layer:
+                pin_layer = QgsVectorLayer(f"Point?crs={dest_crs.authid()}", "GoogleMaps_Pin", "memory")
+                QgsProject.instance().addMapLayer(pin_layer)
+                
+                # 심볼 스타일 적용 (빨간색 마커)
+                symbol = pin_layer.renderer().symbol()
+                if symbol:
+                    symbol.setColor(QColor(229, 62, 62))
+                    symbol.setSize(8.0)
+            else:
+                if pin_layer.crs() != dest_crs:
+                    pin_layer.setCrs(dest_crs)
+                
+                # 기존 핀 피처 삭제
+                pin_layer.startEditing()
+                fids = [f.id() for f in pin_layer.getFeatures()]
+                if fids:
+                    pin_layer.deleteFeatures(fids)
+                pin_layer.commitChanges()
+                
+            # 새 핀 피처 추가
+            feat = QgsFeature()
+            feat.setGeometry(QgsGeometry.fromPointXY(point_transformed))
+            pin_layer.dataProvider().addFeatures([feat])
+            pin_layer.triggerRepaint()
+            
+            # 크롭박스 생성 여부 팝업 질문
+            reply = QMessageBox.question(
+                self, "크롭 박스 생성 확인",
+                "이동한 위치를 기준으로 지형 크롭 박스(영역)를 생성하시겠습니까?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+            )
+            if reply == QMessageBox.Yes:
+                self.create_crop_boxes_at_coords(point_transformed.x(), point_transformed.y())
+            
+        except Exception as e:
+            QMessageBox.critical(self, "변환 실패", f"좌표계 변환 중 오류가 발생했습니다: {str(e)}")
+
+    def create_crop_boxes_at_coords(self, cx, cy):
+        dialog = MultiSizeSelectDialog(iface.mainWindow())
+        if not dialog.exec_():
+            return
+            
+        selected_sizes = dialog.selected_sizes
+        if not selected_sizes:
+            return
+            
+        color_map = {
+            "2048": QColor(0, 200, 0, 255),    
+            "4096": QColor(255, 0, 0, 255),    
+            "8192": QColor(0, 0, 255, 255),    
+            "15360": QColor(128, 0, 128, 255) 
+        }
+        
+        sorted_sizes = sorted(selected_sizes, key=int)
+        
+        last_created_layer = None
+        last_size_label = None
+        last_line_color = None
+        
+        canvas = iface.mapCanvas()
+        crs_auth = canvas.mapSettings().destinationCrs().authid()
+        
+        from qgis.core import QgsRectangle, QgsGeometry, QgsVectorLayer, QgsFeature, QgsProject, QgsSimpleFillSymbolLayer
+        
+        for size_str in sorted_sizes:
+            distance_m = float(size_str)
+            line_color = color_map.get(size_str, QColor(150, 0, 255, 255))
+            size_label = size_str
+            
+            half_size = distance_m / 2.0
+            rect = QgsRectangle(cx - half_size, cy - half_size, cx + half_size, cy + half_size)
+            square_geo = QgsGeometry.fromRect(rect)
+            
+            temp_layer = QgsVectorLayer(f"Polygon?crs={crs_auth}", f"Temp_Square_{size_label}m", "memory")
+            provider = temp_layer.dataProvider()
+            
+            feature = QgsFeature()
+            feature.setGeometry(square_geo)
+            provider.addFeatures([feature])
+            
+            symbol = temp_layer.renderer().symbol()
+            stroke_symbol = QgsSimpleFillSymbolLayer()
+            stroke_symbol.setFillColor(QColor(0, 0, 0, 0))
+            stroke_symbol.setStrokeColor(line_color)
+            stroke_symbol.setStrokeWidth(1.5)
+            symbol.changeSymbolLayer(0, stroke_symbol)
+            
+            QgsProject.instance().addMapLayer(temp_layer)
+            temp_layer.triggerRepaint()
+            
+            last_created_layer = temp_layer
+            last_size_label = size_label
+            last_line_color = line_color
+            
+        canvas.refresh()
+        
+        if last_created_layer:
+            self.set_active_layer(last_created_layer, last_size_label, last_line_color)
+            self.refresh_layers() # 드롭다운 갱신
 
     def export_multiple_layers(self, manual_only=False):
         """ 다중 선택되거나 감지된 DEM + 항공사진을 설정 창을 통해 동시 추출 저장 """
@@ -1215,6 +1422,7 @@ class TerrainEditController(QWidget):
         
         selected_item = diag.selected_value
         dem_format = diag.dem_format
+        color_format = diag.color_format
         if selected_item == "직접 입력...":
             custom_dialog = QInputDialog(self)
             custom_dialog.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
@@ -1228,7 +1436,7 @@ class TerrainEditController(QWidget):
         else:
             pixel_size = int(selected_item)
 
-        export_dir = QFileDialog.getExistingDirectory(self, "결과물(.bt / .tif)을 일괄 저장할 폴더 선택", "")
+        export_dir = QFileDialog.getExistingDirectory(self, "결과물(.bt / .tif / .bmp)을 일괄 저장할 폴더 선택", "")
         if not export_dir: return
 
         success_count = 0
@@ -1240,17 +1448,32 @@ class TerrainEditController(QWidget):
             is_dem = False
             
             if is_vector:
-                file_name = f"{target_layer.name()}_{self.size_label}m_{pixel_size}.tif"
+                if color_format == "BMP":
+                    file_name = f"{target_layer.name()}_{self.size_label}m_{pixel_size}.bmp"
+                else:
+                    file_name = f"{target_layer.name()}_{self.size_label}m_{pixel_size}.tif"
             else:
                 layer_name = target_layer.name().lower()
                 # 선택된 래스터 레이어가 1개 뿐인 경우 이름과 무관하게 DEM으로 처리하여 편리성 증대
                 raster_count = len([l for l in target_layers if isinstance(l, QgsRasterLayer)])
-                is_dem = (raster_count == 1) or any(
+                is_dem = any(
                     k in layer_name for k in [
                         "dem", "dsm", "dtm", "height", "높이", "수치표고", 
                         "vworld_dem", "elevation", "지형", "고도", "terrain", "grid"
                     ]
                 )
+                if not is_dem and raster_count == 1:
+                    is_satellite_name = any(
+                        k in layer_name for k in [
+                            "satellite", "aerial", "tms", "xyz", "osm", "map", "daum", "kakao", 
+                            "naver", "google", "bing", "ortho", "항공", "위성", "지도", "image"
+                        ]
+                    )
+                    if is_satellite_name or color_format == "BMP":
+                        is_dem = False
+                    else:
+                        is_dem = True
+                
                 if is_dem:
                     if dem_format == "BT":
                         file_name = f"Terrain_{self.size_label}m_{pixel_size}.bt"
@@ -1262,7 +1485,10 @@ class TerrainEditController(QWidget):
                         file_name = f"Hillshade_{self.size_label}m_{pixel_size}.tif"
                         gdal_format = "GTiff"
                 else:
-                    file_name = f"Satellite_{self.size_label}m_{pixel_size}.tif"
+                    if color_format == "BMP":
+                        file_name = f"Satellite_{self.size_label}m_{pixel_size}.bmp"
+                    else:
+                        file_name = f"Satellite_{self.size_label}m_{pixel_size}.tif"
                     gdal_format = "GTiff"
                 
             out_path = os.path.join(export_dir, file_name)
@@ -1272,8 +1498,8 @@ class TerrainEditController(QWidget):
             QCoreApplication.processEvents()
 
             try:
-                if is_vector:
-                    # QImage로 QGIS 벡터 스타일 그대로 고해상도 렌더링
+                if is_vector or (not is_dem and color_format == "BMP"):
+                    # QImage로 QGIS 스타일 그대로 고해상도 렌더링
                     image = QImage(QSize(pixel_size, pixel_size), QImage.Format_ARGB32_Premultiplied)
                     image.fill(Qt.transparent)
                     
@@ -1291,22 +1517,27 @@ class TerrainEditController(QWidget):
                     job.waitForFinished()
                     painter.end()
                     
-                    # TIFF 저장
-                    image.save(out_path, "TIFF")
-                    
-                    # GDAL GeoTransform & CRS Projection 정보 삽입하여 완벽한 GeoTIFF 제작
-                    ds = gdal.Open(out_path, gdal.GA_Update)
-                    if ds:
-                        x_pixel_size = bbox.width() / float(pixel_size)
-                        y_pixel_size = bbox.height() / float(pixel_size)
-                        geotransform = [bbox.xMinimum(), x_pixel_size, 0.0, bbox.yMaximum(), 0.0, -y_pixel_size]
-                        ds.SetGeoTransform(geotransform)
+                    if color_format == "BMP":
+                        # BMP 저장 (순수 이미지만 저장, 메타데이터 없음)
+                        image.save(out_path, "BMP")
+                    else:
+                        # TIFF 저장
+                        image.save(out_path, "TIFF")
                         
-                        crs = iface.mapCanvas().mapSettings().destinationCrs()
-                        ds.SetProjection(crs.toWkt())
-                        ds = None
+                        # GDAL GeoTransform & CRS Projection 정보 삽입하여 완벽한 GeoTIFF 제작
+                        ds = gdal.Open(out_path, gdal.GA_Update)
+                        if ds:
+                            x_pixel_size = bbox.width() / float(pixel_size)
+                            y_pixel_size = bbox.height() / float(pixel_size)
+                            geotransform = [bbox.xMinimum(), x_pixel_size, 0.0, bbox.yMaximum(), 0.0, -y_pixel_size]
+                            ds.SetGeoTransform(geotransform)
+                            
+                            crs = iface.mapCanvas().mapSettings().destinationCrs()
+                            ds.SetProjection(crs.toWkt())
+                            ds = None
                         
-                    iface.addRasterLayer(out_path, os.path.basename(out_path))
+                    if color_format != "BMP":
+                        iface.addRasterLayer(out_path, os.path.basename(out_path))
                     success_count += 1
                 else:
                     source_path = target_layer.source()
@@ -1334,36 +1565,58 @@ class TerrainEditController(QWidget):
                     )
                     
                     if is_dem and dem_format == "Hillshade":
-                        # 1. 임시 DEM 메모리 로드
-                        warp_ds = gdal.Warp("/vsimem/export_dem.tif", source_path, options=warp_options)
-                        
-                        # 2. 다중방향 음영 연산 수행
+                        # 1. 임시 레이어 복제 및 힐쉐이드 렌더러 설정
+                        try:
+                            render_layer = target_layer.clone()
+                        except:
+                            render_layer = QgsRasterLayer(target_layer.source(), target_layer.name() + "_temp")
+                            
+                        provider = render_layer.dataProvider()
                         is_multi = diag.cb_multidirectional.isChecked()
-                        print(f"ℹ️ {target_layer.name()} 음영기복도 생성 시작 (고도: {diag.altitude}, 방위각: {diag.azimuth if not is_multi else 'N/A'}, Z척도: {diag.z_factor}, 다중방향: {is_multi})...")
-                        scale_val = 1.0
-                        if dest_crs.isGeographic():
-                            scale_val = 111120.0
-                            
-                        opts_dict = {
-                            "format": "GTiff",  # 파일로 최종 저장
-                            "alg": "zevenbergenThorne",
-                            "computeEdges": True,
-                            "zFactor": diag.z_factor,
-                            "scale": scale_val,
-                            "altitude": diag.altitude
-                        }
-                        if is_multi:
-                            opts_dict["multiDirectional"] = True
-                        else:
-                            opts_dict["azimuth"] = diag.azimuth
-                            
-                        dem_opts = gdal.DEMProcessingOptions(**opts_dict)
+                        print(f"ℹ️ {target_layer.name()} 음영기복도 생성 시작 (QgsMapRendererCustomPainterJob)...")
                         
-                        # 파일 쓰기
-                        ds_shade = gdal.DEMProcessing(out_path, warp_ds, "hillshade", options=dem_opts)
-                        ds_shade = None  # 저장 완료
-                        warp_ds = None   # 메모리 해제
-                        gdal.Unlink("/vsimem/export_dem.tif")  # 가상 메모리 DEM 청소
+                        hillshade_renderer = QgsHillshadeRenderer(
+                            provider,
+                            1, # band 1
+                            diag.azimuth if not is_multi else 315.0,
+                            diag.altitude
+                        )
+                        hillshade_renderer.setZFactor(diag.z_factor)
+                        hillshade_renderer.setMultiDirectional(is_multi)
+                        render_layer.setRenderer(hillshade_renderer)
+                        
+                        # 2. QImage 스냅샷 고해상도 렌더링
+                        image = QImage(QSize(pixel_size, pixel_size), QImage.Format_ARGB32_Premultiplied)
+                        image.fill(Qt.transparent)
+                        
+                        painter = QPainter(image)
+                        
+                        settings = QgsMapSettings()
+                        settings.setLayers([render_layer])
+                        settings.setExtent(bbox)
+                        settings.setOutputSize(QSize(pixel_size, pixel_size))
+                        settings.setDestinationCrs(iface.mapCanvas().mapSettings().destinationCrs())
+                        settings.setBackgroundColor(QColor(0, 0, 0, 0))
+                        
+                        job = QgsMapRendererCustomPainterJob(settings, painter)
+                        job.start()
+                        job.waitForFinished()
+                        painter.end()
+                        
+                        # TIFF 저장
+                        image.save(out_path, "TIFF")
+                        
+                        # GDAL GeoTransform & CRS Projection 정보 삽입하여 완벽한 GeoTIFF 제작
+                        ds = gdal.Open(out_path, gdal.GA_Update)
+                        if ds:
+                            x_pixel_size = bbox.width() / float(pixel_size)
+                            y_pixel_size = bbox.height() / float(pixel_size)
+                            geotransform = [bbox.xMinimum(), x_pixel_size, 0.0, bbox.yMaximum(), 0.0, -y_pixel_size]
+                            ds.SetGeoTransform(geotransform)
+                            
+                            crs = iface.mapCanvas().mapSettings().destinationCrs()
+                            ds.SetProjection(crs.toWkt())
+                            ds = None
                     else:
                         warp_ds = gdal.Warp(out_path, source_path, options=warp_options)
                         if warp_ds is not None:
@@ -1394,12 +1647,12 @@ class TerrainEditController(QWidget):
         if exported_dem_path and os.path.exists(exported_dem_path):
             ext = os.path.splitext(exported_dem_path)[1]
             reply = QMessageBox.question(
-                self, "R16 변환 확인", 
-                f"DEM ({ext}) 파일 추출이 완료되었습니다.\n크라이엔진용 R16 (.r16) 파일로 지금 바로 변환하시겠습니까?",
+                self, "RAW 변환 확인", 
+                f"DEM ({ext}) 파일 추출이 완료되었습니다.\n크라이엔진용 RAW (.raw) 파일로 지금 바로 변환하시겠습니까?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
             )
             if reply == QMessageBox.Yes:
-                self.open_r16_converter(exported_dem_path)
+                self.open_raw_converter(exported_dem_path)
 
     def close_controller(self):
         if self.is_layer_valid() and self.layer.isEditable():
@@ -1407,10 +1660,10 @@ class TerrainEditController(QWidget):
         self.close()
         self.plugin_ref.reactivate_tool() 
 
-    def open_r16_converter(self, default_input=""):
+    def open_raw_converter(self, default_input=""):
         if not isinstance(default_input, str):
             default_input = ""
-        diag = R16ConversionDialog(parent=self, default_input=default_input)
+        diag = RawConversionDialog(parent=self, default_input=default_input)
         diag.exec_() 
 
 class ClickToSquareColorPresetTool(QgsMapToolEmitPoint):
@@ -1506,6 +1759,9 @@ class CryTerrainPlugin:
 
     def initGui(self):
         self.action = QAction("📐 지형 거리별 크롭 박스 생성", self.iface.mainWindow())
+        icon_path = os.path.join(os.path.dirname(__file__), "icon.png")
+        if os.path.exists(icon_path):
+            self.action.setIcon(QIcon(icon_path))
         self.action.triggered.connect(self.run_tool)
         self.iface.addPluginToMenu("&지형 크롭 도구", self.action)
         self.iface.addToolBarIcon(self.action)
