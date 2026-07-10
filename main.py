@@ -679,6 +679,39 @@ class TerrainEditController(QWidget):
             QComboBox:hover {
                 border-color: #3182ce;
             }
+            QComboBox#combo_crop_layers {
+                background-color: #ebf8ff;
+                color: #1a365d;
+                border: 2px solid #2b6cb0;
+                border-radius: 4px;
+                padding: 5px 8px;
+                min-height: 30px;
+                font-weight: bold;
+            }
+            QComboBox#combo_crop_layers:hover {
+                background-color: #bee3f8;
+                border-color: #1a365d;
+            }
+            QComboBox#combo_crop_layers:focus {
+                background-color: #bee3f8;
+                border-color: #dd6b20;
+            }
+            QComboBox#combo_crop_layers QAbstractItemView {
+                background-color: #ffffff;
+                color: #1a202c;
+                selection-background-color: #2b6cb0;
+                selection-color: #ffffff;
+                border: 1px solid #2b6cb0;
+                outline: 0;
+            }
+            QLabel#lbl_crop_status {
+                background-color: #e6fffa;
+                color: #234e52;
+                border: 1px solid #319795;
+                border-radius: 4px;
+                padding: 5px 6px;
+                font-weight: bold;
+            }
             QPushButton {
                 background-color: #ffffff;
                 border: 1px solid #cbd5e0;
@@ -726,20 +759,20 @@ class TerrainEditController(QWidget):
             }
             QPushButton#btn_move:hover { background-color: #2d3748; }
             
-            QPushButton#btn_save_shp {
-                background-color: #dd6b20;
-                color: white;
-                border: none;
-            }
-            QPushButton#btn_save_shp:hover { background-color: #c05621; }
-            
             QPushButton#btn_save_scratch {
                 background-color: #38a169;
                 color: white;
                 border: none;
             }
-            QPushButton#btn_save_scratch:hover { background-color: #2f855a; }
             
+            QPushButton#btn_save_scratch:hover { background-color: #2f855a; }
+
+            QPushButton#btn_fit_raster {
+                background-color: #319795;
+                color: white;
+                border: none;
+            }
+            QPushButton#btn_fit_raster:hover { background-color: #2c7a7b; }            
             QPushButton#btn_manual_export {
                 background-color: #4a5568;
                 color: white;
@@ -747,13 +780,6 @@ class TerrainEditController(QWidget):
             }
             QPushButton#btn_manual_export:hover { background-color: #2d3748; }
 
-            QPushButton#btn_export {
-                background-color: #2b6cb0;
-                color: white;
-                border: none;
-            }
-            QPushButton#btn_export:hover { background-color: #2c5282; }
-            
             QPushButton#btn_convert_r16 {
                 background-color: #805ad5;
                 color: white;
@@ -789,10 +815,13 @@ class TerrainEditController(QWidget):
         layout.addWidget(lbl_select)
         
         self.combo_layers = QComboBox(self)
+        self.combo_layers.setObjectName("combo_crop_layers")
+        self.combo_layers.setMinimumHeight(34)
         self.combo_layers.currentIndexChanged.connect(self.on_layer_changed)
         layout.addWidget(self.combo_layers)
         
         self.lbl_status = QLabel("", self)
+        self.lbl_status.setObjectName("lbl_crop_status")
         self.lbl_status.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.lbl_status)
         
@@ -822,27 +851,19 @@ class TerrainEditController(QWidget):
         self.btn_move.setObjectName("btn_move")
         self.btn_move.clicked.connect(self.activate_move_tool)
         layout.addWidget(self.btn_move)
-        
-        self.btn_save_shp = QPushButton("💾 현재 박스 SHP 파일로 저장", self)
-        self.btn_save_shp.setObjectName("btn_save_shp")
-        self.btn_save_shp.clicked.connect(self.save_current_box_to_shp)
-        layout.addWidget(self.btn_save_shp)
-        
-        self.btn_save_scratch = QPushButton("💾 선택한 임시 레이어 저장", self)
+        self.btn_save_scratch = QPushButton("💾 크롭바운드/선택 레이어 저장", self)
         self.btn_save_scratch.setObjectName("btn_save_scratch")
-        self.btn_save_scratch.clicked.connect(self.save_selected_scratch_layers)
+        self.btn_save_scratch.clicked.connect(self.save_crop_bounds_or_selected_layers)
         layout.addWidget(self.btn_save_scratch)
-        
+
+        self.btn_fit_raster = QPushButton("DEM 영역으로 크롭바운드/8192 맞춤", self)
+        self.btn_fit_raster.setObjectName("btn_fit_raster")
+        self.btn_fit_raster.clicked.connect(self.fit_selected_rasters_to_crop_bounds)
+        layout.addWidget(self.btn_fit_raster)        
         self.btn_manual_export = QPushButton("⚙️ 수동 내보내기 설정 및 실행", self)
         self.btn_manual_export.setObjectName("btn_manual_export")
         self.btn_manual_export.clicked.connect(lambda: self.export_multiple_layers(manual_only=True))
         layout.addWidget(self.btn_manual_export)
-        
-        self.btn_export = QPushButton("🚀 DEM + 항공사진 자동 일괄 내보내기", self)
-        self.btn_export.setObjectName("btn_export")
-        self.btn_export.clicked.connect(lambda: self.export_multiple_layers(manual_only=False))
-        layout.addWidget(self.btn_export)
-        
         self.btn_convert_raw = QPushButton("🎮 크라이엔진용 RAW 변환기", self)
         self.btn_convert_raw.setObjectName("btn_convert_raw")
         self.btn_convert_raw.clicked.connect(self.open_raw_converter)
@@ -867,10 +888,9 @@ class TerrainEditController(QWidget):
         self.btn_create_box.setToolTip("지도 상에서 마우스 클릭으로 정사각형 크롭 영역(박스)을 새로 생성합니다.")
         self.btn_edit.setToolTip("선택된 크롭 박스 레이어의 편집 모드를 켜서 사각형 크기를 수동 조절하거나, 완료 후 저장하고 끕니다. (Ctrl+E)")
         self.btn_move.setToolTip("선택된 크롭 박스를 드래그하여 지도 위에서 다른 위치로 자유롭게 이동시킵니다. (Ctrl+M)")
-        self.btn_save_shp.setToolTip("현재 임시 사각 영역 레이어를 정식 Shapefile(.shp) 파일로 컴퓨터에 영구 저장합니다.")
-        self.btn_save_scratch.setToolTip("레이어 패널에서 선택한 임시 메모리 레이어(.gpkg/.shp)를 영구 저장 및 교체합니다. (원래 스타일/라벨 유지) (Ctrl+S)")
+        self.btn_fit_raster.setToolTip("레이어 패널에서 DEM 또는 8192x8192 이미지/래스터를 선택하면 크롭바운드를 해당 DEM 영역으로 이동하고, 8192 래스터는 그 크롭바운드에 맞춘 VRT 레이어로 추가합니다.")
+        self.btn_save_scratch.setToolTip("선택한 임시 레이어가 있으면 저장하고, 없으면 현재 크롭바운드 박스를 SHP로 저장합니다. (Ctrl+S)")
         self.btn_manual_export.setToolTip("레이어 패널에서 내가 직접 선택한 래스터/벡터 레이어들을 현재 설정된 영역대로 크롭 내보내기합니다.")
-        self.btn_export.setToolTip("프로젝트 내의 DEM과 위성/항공사진을 찾아 현재 사각 영역 크기에 맞춰 원터치 일괄 내보내기합니다.")
         self.btn_convert_raw.setToolTip("지형 고도 데이터를 크라이엔진(CryEngine) 전용 RAW (.raw) 규격으로 변환합니다.")
 
         # 단축키 설정 및 바인딩
@@ -958,27 +978,29 @@ class TerrainEditController(QWidget):
 
     def update_buttons_state(self):
         if self.is_layer_valid():
-            self.lbl_status.setText(f"임시 배치 상태 ({self.size_label}m)" if "Temp" in self.layer.name() else f"정식 SHP: {self.layer.name()}")
+            self.lbl_status.setText(f"선택됨: {self.layer.name()} ({self.size_label}m)" if "Temp" in self.layer.name() else f"선택됨: {self.layer.name()}")
+            self.lbl_status.setStyleSheet("background-color: #e6fffa; color: #234e52; border: 1px solid #319795; border-radius: 4px; padding: 5px 6px; font-weight: bold;")
+            self.combo_layers.setStyleSheet("QComboBox#combo_crop_layers { background-color: #ebf8ff; color: #1a365d; border: 2px solid #2b6cb0; border-radius: 4px; padding: 5px 8px; min-height: 30px; font-weight: bold; }")
             
             self.btn_edit.setEnabled(True)
             self.btn_edit.setChecked(self.layer.isEditable())
             self.btn_edit.setText("🛑 편집 저장 및 종료" if self.layer.isEditable() else "✏️ 편집 모드 켜기")
             
             self.btn_move.setEnabled(True)
-            self.btn_save_shp.setEnabled(True)
+            self.btn_fit_raster.setEnabled(True)
             self.btn_manual_export.setEnabled(True)
-            self.btn_export.setEnabled(True)
         else:
-            self.lbl_status.setText("크롭 박스가 생성되지 않았습니다.")
+            self.lbl_status.setText("크롭바운드 레이어 미선택")
+            self.lbl_status.setStyleSheet("background-color: #fff5f5; color: #742a2a; border: 1px solid #e53e3e; border-radius: 4px; padding: 5px 6px; font-weight: bold;")
+            self.combo_layers.setStyleSheet("QComboBox#combo_crop_layers { background-color: #fff5f5; color: #742a2a; border: 2px solid #e53e3e; border-radius: 4px; padding: 5px 8px; min-height: 30px; font-weight: bold; }")
             
             self.btn_edit.setEnabled(False)
             self.btn_edit.setChecked(False)
             self.btn_edit.setText("✏️ 편집 모드 켜기")
             
             self.btn_move.setEnabled(False)
-            self.btn_save_shp.setEnabled(False)
+            self.btn_fit_raster.setEnabled(False)
             self.btn_manual_export.setEnabled(False)
-            self.btn_export.setEnabled(False)
 
     def set_active_layer(self, layer, size_label, line_color):
         self.layer = layer
@@ -1021,6 +1043,19 @@ class TerrainEditController(QWidget):
         except:
             pass
 
+    def save_crop_bounds_or_selected_layers(self):
+        selected_layers = iface.layerTreeView().selectedLayers()
+        scratch_layers = []
+        for layer in selected_layers:
+            if isinstance(layer, QgsVectorLayer):
+                is_temp = layer.isTemporary() or (layer.dataProvider() and layer.dataProvider().name() == 'memory')
+                if is_temp:
+                    scratch_layers.append(layer)
+
+        if scratch_layers:
+            self.save_selected_scratch_layers(scratch_layers)
+        else:
+            self.save_current_box_to_shp()
     def save_current_box_to_shp(self):
         if not self.is_layer_valid(): return
         if self.layer.isEditable():
@@ -1074,18 +1109,19 @@ class TerrainEditController(QWidget):
         else:
             QMessageBox.critical(self, "저장 에러", f"SHP 라이팅 작업 중 내부 IO 오류가 발생했습니다.\n{error_string}")
 
-    def save_selected_scratch_layers(self):
+    def save_selected_scratch_layers(self, scratch_layers=None):
         selected_layers = iface.layerTreeView().selectedLayers()
         if not selected_layers:
             QMessageBox.warning(self, "알림", "선택된 레이어가 없습니다.\n레이어 패널에서 저장할 임시 스크레치 레이어를 선택해 주세요.")
             return
 
-        scratch_layers = []
-        for layer in selected_layers:
-            if isinstance(layer, QgsVectorLayer):
-                is_temp = layer.isTemporary() or (layer.dataProvider() and layer.dataProvider().name() == 'memory')
-                if is_temp:
-                    scratch_layers.append(layer)
+        if scratch_layers is None:
+            scratch_layers = []
+            for layer in selected_layers:
+                if isinstance(layer, QgsVectorLayer):
+                    is_temp = layer.isTemporary() or (layer.dataProvider() and layer.dataProvider().name() == 'memory')
+                    if is_temp:
+                        scratch_layers.append(layer)
 
         if not scratch_layers:
             QMessageBox.warning(self, "알림", "선택한 레이어 중 저장되지 않은 임시 스크레치 레이어가 없습니다.")
@@ -1170,6 +1206,142 @@ class TerrainEditController(QWidget):
                 f"성공적으로 {success_count}개의 임시 레이어를 영구 레이어로 저장했습니다."
             )
 
+    def fit_selected_rasters_to_crop_bounds(self):
+        if not self.is_layer_valid():
+            QMessageBox.warning(self, "No crop bounds", "Select or create a crop bounds layer first.")
+            return
+
+        features = list(self.layer.getFeatures())
+        if not features:
+            QMessageBox.critical(self, "No crop bounds", "The selected crop bounds layer has no geometry.")
+            return
+
+        selected_layers = iface.layerTreeView().selectedLayers()
+        target_layers = [l for l in selected_layers if isinstance(l, QgsRasterLayer)]
+        active_layer = iface.activeLayer()
+        if not target_layers and isinstance(active_layer, QgsRasterLayer):
+            target_layers = [active_layer]
+
+        if not target_layers:
+            QMessageBox.warning(self, "No raster selected", "Select a DEM or 8192x8192 image/raster layer in the Layers panel first.")
+            return
+
+        crop_crs = self.layer.crs()
+        if not crop_crs.isValid():
+            crop_crs = iface.mapCanvas().mapSettings().destinationCrs()
+
+        def is_dem_like(layer):
+            name = layer.name().lower()
+            return any(k in name for k in [
+                "dem", "dsm", "dtm", "height", "elevation", "terrain", "grid", "vworld_dem",
+                "고도", "지형", "높이"
+            ])
+
+        reference_layer = None
+        for raster_layer in target_layers:
+            if is_dem_like(raster_layer):
+                reference_layer = raster_layer
+                break
+        if reference_layer is None:
+            reference_layer = target_layers[0]
+
+        bbox = reference_layer.extent()
+        if bbox.isEmpty():
+            QMessageBox.critical(self, "Invalid raster extent", "The selected DEM/raster layer has an empty extent.")
+            return
+
+        raster_crs = reference_layer.crs()
+        if raster_crs.isValid() and crop_crs.isValid() and raster_crs != crop_crs:
+            try:
+                transform = QgsCoordinateTransform(raster_crs, crop_crs, QgsProject.instance())
+                bbox = transform.transformBoundingBox(bbox)
+            except Exception as e:
+                QMessageBox.critical(self, "CRS transform failed", f"Could not transform DEM/raster extent to crop bounds CRS.\n{str(e)}")
+                return
+
+        new_geometry = QgsGeometry.fromRect(bbox)
+        feature_id = features[0].id()
+        if self.layer.isEditable():
+            changed = self.layer.changeGeometry(feature_id, new_geometry)
+        else:
+            changed = self.layer.dataProvider().changeGeometryValues({feature_id: new_geometry})
+
+        if not changed:
+            QMessageBox.critical(self, "Crop bounds update failed", "Could not move the crop bounds to the DEM/raster extent.")
+            return
+
+        self.layer.updateExtents()
+        self.layer.triggerRepaint()
+        iface.mapCanvas().refresh()
+
+        output_dir = os.path.join(os.path.dirname(__file__), "fitted_rasters")
+        os.makedirs(output_dir, exist_ok=True)
+
+        success_count = 0
+        skipped = []
+        for raster_layer in target_layers:
+            try:
+                source_path = raster_layer.source()
+                if not os.path.exists(source_path) and hasattr(raster_layer, 'dataProvider'):
+                    source_path = raster_layer.dataProvider().dataSourceUri()
+
+                if not os.path.exists(source_path):
+                    skipped.append(f"{raster_layer.name()}: source file not found")
+                    continue
+
+                src_ds = gdal.Open(source_path, gdal.GA_ReadOnly)
+                if src_ds is None:
+                    skipped.append(f"{raster_layer.name()}: GDAL could not open source")
+                    continue
+
+                width = src_ds.RasterXSize
+                height = src_ds.RasterYSize
+                if width != 8192 or height != 8192:
+                    skipped.append(f"{raster_layer.name()}: {width}x{height}, expected 8192x8192")
+                    src_ds = None
+                    continue
+
+                safe_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in raster_layer.name())
+                base_vrt_path = os.path.join(output_dir, f"{safe_name}_fit_{self.layer.id()}.vrt")
+                vrt_path = base_vrt_path
+                vrt_index = 1
+                while os.path.exists(vrt_path):
+                    vrt_index += 1
+                    vrt_path = os.path.join(output_dir, f"{safe_name}_fit_{self.layer.id()}_{vrt_index}.vrt")
+
+                vrt_ds = gdal.GetDriverByName("VRT").CreateCopy(vrt_path, src_ds, 0)
+                src_ds = None
+                if vrt_ds is None:
+                    skipped.append(f"{raster_layer.name()}: failed to create VRT")
+                    continue
+
+                x_pixel_size = bbox.width() / float(width)
+                y_pixel_size = bbox.height() / float(height)
+                vrt_ds.SetGeoTransform([bbox.xMinimum(), x_pixel_size, 0.0, bbox.yMaximum(), 0.0, -y_pixel_size])
+                vrt_ds.SetProjection(crop_crs.toWkt())
+                vrt_ds = None
+
+                fitted_layer = QgsRasterLayer(vrt_path, f"{raster_layer.name()}_fit_to_{self.layer.name()}")
+                if fitted_layer.isValid():
+                    QgsProject.instance().addMapLayer(fitted_layer)
+                    success_count += 1
+                else:
+                    skipped.append(f"{raster_layer.name()}: fitted VRT is not a valid QGIS layer")
+            except Exception as e:
+                skipped.append(f"{raster_layer.name()}: {str(e)}")
+
+        iface.mapCanvas().refresh()
+
+        msg = f"Moved crop bounds to {reference_layer.name()} extent."
+        if success_count > 0:
+            msg += f"\nFitted {success_count} 8192 raster layer(s) to that crop bounds."
+            if skipped:
+                msg += "\n\nSkipped:\n" + "\n".join(skipped[:8])
+            QMessageBox.information(self, "Fit complete", msg)
+        else:
+            if skipped:
+                msg += "\n\nNo 8192 raster layers were fitted.\n\nSkipped:\n" + "\n".join(skipped[:8])
+            QMessageBox.information(self, "Crop bounds moved", msg)
     def update_scratch_button_state(self):
         try:
             selected_layers = iface.layerTreeView().selectedLayers()
@@ -1181,14 +1353,33 @@ class TerrainEditController(QWidget):
                         scratch_count += 1
                         
             if scratch_count > 0:
-                self.btn_save_scratch.setText(f"💾 선택한 임시 레이어 저장 ({scratch_count}개 선택됨)")
+                self.btn_save_scratch.setText(f"💾 선택 임시 레이어 저장 ({scratch_count}개)")
             else:
-                self.btn_save_scratch.setText("💾 선택한 임시 레이어 저장")
+                self.btn_save_scratch.setText("💾 현재 크롭바운드 SHP 저장")
         except Exception as e:
             print(f"⚠️ 임시 레이어 상태 업데이트 에러: {str(e)}")
             
     def parse_google_maps_url(self, url):
         import re
+        # Pattern 0: DMS format (e.g. 36°20'32.79"N 126°47'32.95"E)
+        dms_pattern = r'(\d+(?:\.\d+)?)\s*[^0-9.NSEWnsew]*\s*(\d+(?:\.\d+)?)\s*[^0-9.NSEWnsew]*\s*(\d+(?:\.\d+)?)\s*[^0-9.NSEWnsew]*\s*([NSEWnsew])'
+        dms_matches = re.findall(dms_pattern, url)
+        if len(dms_matches) == 2:
+            lat, lng = None, None
+            for deg, m, s, hem in dms_matches:
+                try:
+                    val = float(deg) + float(m)/60.0 + float(s)/3600.0
+                    if hem.upper() in ['S', 'W']:
+                        val = -val
+                    if hem.upper() in ['N', 'S']:
+                        lat = val
+                    elif hem.upper() in ['E', 'W']:
+                        lng = val
+                except ValueError:
+                    pass
+            if lat is not None and lng is not None:
+                return lat, lng
+
         # Pattern 1: @lat,lng (most common)
         match = re.search(r'@([0-9.-]+),([0-9.-]+)', url)
         if match:
@@ -1362,7 +1553,7 @@ class TerrainEditController(QWidget):
             self.set_active_layer(last_created_layer, last_size_label, last_line_color)
             self.refresh_layers() # 드롭다운 갱신
 
-    def export_multiple_layers(self, manual_only=False):
+    def export_multiple_layers(self, manual_only=True):
         """ 다중 선택되거나 감지된 DEM + 항공사진을 설정 창을 통해 동시 추출 저장 """
         if not self.is_layer_valid():
             QMessageBox.warning(self, "알림", "크롭 기준이 되는 지형 박스 레이어가 없습니다. 먼저 박스를 생성해 주세요.")
@@ -1376,16 +1567,6 @@ class TerrainEditController(QWidget):
         selected_layers = iface.layerTreeView().selectedLayers()
         # Raster 및 Vector 레이어 모두 포함 (단, cropbox 레이어 자체는 제외)
         target_layers = [l for l in selected_layers if l.id() != self.layer.id() and (isinstance(l, QgsRasterLayer) or isinstance(l, QgsVectorLayer))]
-        
-        if manual_only:
-            if not target_layers:
-                QMessageBox.warning(self, "알림", "수동 내보내기를 하려면 QGIS 레이어 패널에서 크롭하고자 하는 레이어(래스터/벡터)를 선택한 후 실행해 주세요.")
-                return
-        else:
-            if not target_layers:
-                all_layers = QgsProject.instance().mapLayers().values()
-                target_layers = [l for l in all_layers if l.id() != self.layer.id() and (isinstance(l, QgsRasterLayer) or isinstance(l, QgsVectorLayer))]
-
         if not target_layers:
             QMessageBox.warning(self, "알림", "자르고 싶은 DEM 레이어, 항공사진(래스터), 혹은 Shapefile(벡터) 레이어가 존재하지 않습니다.")
             return
@@ -1462,17 +1643,8 @@ class TerrainEditController(QWidget):
                         "vworld_dem", "elevation", "지형", "고도", "terrain", "grid"
                     ]
                 )
-                if not is_dem and raster_count == 1:
-                    is_satellite_name = any(
-                        k in layer_name for k in [
-                            "satellite", "aerial", "tms", "xyz", "osm", "map", "daum", "kakao", 
-                            "naver", "google", "bing", "ortho", "항공", "위성", "지도", "image"
-                        ]
-                    )
-                    if is_satellite_name or color_format == "BMP":
-                        is_dem = False
-                    else:
-                        is_dem = True
+                if not is_dem:
+                    is_dem = False
                 
                 if is_dem:
                     if dem_format == "BT":
@@ -1485,10 +1657,11 @@ class TerrainEditController(QWidget):
                         file_name = f"Hillshade_{self.size_label}m_{pixel_size}.tif"
                         gdal_format = "GTiff"
                 else:
+                    safe_layer_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in target_layer.name())
                     if color_format == "BMP":
-                        file_name = f"Satellite_{self.size_label}m_{pixel_size}.bmp"
+                        file_name = f"Satellite_{safe_layer_name}_{self.size_label}m_{pixel_size}.bmp"
                     else:
-                        file_name = f"Satellite_{self.size_label}m_{pixel_size}.tif"
+                        file_name = f"Satellite_{safe_layer_name}_{self.size_label}m_{pixel_size}.tif"
                     gdal_format = "GTiff"
                 
             out_path = os.path.join(export_dir, file_name)
@@ -1498,7 +1671,7 @@ class TerrainEditController(QWidget):
             QCoreApplication.processEvents()
 
             try:
-                if is_vector or (not is_dem and color_format == "BMP"):
+                if is_vector or not is_dem:
                     # QImage로 QGIS 스타일 그대로 고해상도 렌더링
                     image = QImage(QSize(pixel_size, pixel_size), QImage.Format_ARGB32_Premultiplied)
                     image.fill(Qt.transparent)
@@ -1756,6 +1929,7 @@ class CryTerrainPlugin:
         self.action = None
         self.tool = None
         self.controllers = []
+        self.listener = None
 
     def initGui(self):
         self.action = QAction("📐 지형 거리별 크롭 박스 생성", self.iface.mainWindow())
@@ -1765,8 +1939,23 @@ class CryTerrainPlugin:
         self.action.triggered.connect(self.run_tool)
         self.iface.addPluginToMenu("&지형 크롭 도구", self.action)
         self.iface.addToolBarIcon(self.action)
+        
+        # 외부 소켓 명령 수신기 구동 (텔레그램 연동 등)
+        try:
+            from .external_listener import ExternalListener
+            self.listener = ExternalListener(self)
+            self.listener.start()
+        except Exception as e:
+            print(f"[CryTerrainPlugin] 외부 소켓 수신기 구동 실패: {e}")
 
     def unload(self):
+        if self.listener:
+            try:
+                self.listener.stop()
+            except:
+                pass
+            self.listener = None
+            
         if self.action:
             self.iface.removePluginMenu("&지형 크롭 도구", self.action)
             self.iface.removeToolBarIcon(self.action)
@@ -1823,3 +2012,114 @@ class CryTerrainPlugin:
 
     def reactivate_tool(self):
         pass
+
+    def execute_create_crop_boxes(self, lat, lng, sizes):
+        from qgis.core import QgsCoordinateReferenceSystem, QgsPointXY, QgsCoordinateTransform
+        import traceback
+        import os
+        log_path = os.path.join(os.path.dirname(__file__), "error_log.txt")
+        
+        with open(log_path, "w", encoding="utf-8") as f_log:
+            f_log.write("--- Starting execute_create_crop_boxes ---\n")
+            f_log.write(f"Parameters: lat={lat}, lng={lng}, sizes={sizes}\n")
+            
+            try:
+                # 0. 새 프로젝트 생성 (기존 프로젝트 닫기)
+                f_log.write("Step 0: Creating new project...\n")
+                try:
+                    self.iface.newProject(False)
+                    f_log.write("Step 0: New project created successfully\n")
+                except Exception as pe:
+                    f_log.write(f"Step 0 warning: newProject failed: {pe}\n")
+                    
+                # 1. Coordinate conversion & Canvas pan
+                f_log.write("Step 1: Setting up canvas and CRS...\n")
+                canvas = self.iface.mapCanvas()
+                dest_crs = canvas.mapSettings().destinationCrs()
+                f_log.write(f"Initial destination CRS: {dest_crs.authid()}, Geographic: {dest_crs.isGeographic()}\n")
+                
+                # 새 프로젝트의 CRS가 유효하지 않거나 경위도(degree) 단위인 경우, 미터 단위 연산을 위해 EPSG:3857로 기본 설정
+                if not dest_crs.isValid() or dest_crs.isGeographic():
+                    proj_crs = QgsCoordinateReferenceSystem("EPSG:3857")
+                    QgsProject.instance().setCrs(proj_crs)
+                    dest_crs = proj_crs
+                    f_log.write(f"Updated destination CRS to: {dest_crs.authid()}\n")
+                    
+                # 0.5 Add Vworld Satellite Layer
+                f_log.write("Step 0.5: Adding Vworld Satellite layer...\n")
+                try:
+                    vworld_url = "type=xyz&url=http://xdworld.vworld.kr:8080/2d/Satellite/service/{z}/{x}/{y}.jpeg&zmax=19&zmin=0"
+                    vworld_layer = QgsRasterLayer(vworld_url, "Vworld Satellite", "wms")
+                    if vworld_layer.isValid():
+                        QgsProject.instance().addMapLayer(vworld_layer)
+                        f_log.write("Vworld Satellite layer added successfully\n")
+                    else:
+                        f_log.write("Warning: Vworld Satellite layer is not valid\n")
+                except Exception as ve:
+                    f_log.write(f"Warning: Failed to add Vworld Satellite layer: {ve}\n")
+                    
+                src_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+                point_wgs = QgsPointXY(lng, lat)
+                
+                transform = QgsCoordinateTransform(src_crs, dest_crs, QgsProject.instance())
+                point_transformed = transform.transform(point_wgs)
+                f_log.write(f"Transformed point: x={point_transformed.x()}, y={point_transformed.y()}\n")
+                
+                canvas.setCenter(point_transformed)
+                canvas.refresh()
+                f_log.write("Step 1: Canvas center set and refreshed\n")
+                
+                # 2. Spawn boxes
+                f_log.write("Step 2: Spawning boxes...\n")
+                color_map = {
+                    "2048": QColor(0, 200, 0, 255),    
+                    "4096": QColor(255, 0, 0, 255),    
+                    "8192": QColor(0, 0, 255, 255),    
+                    "15360": QColor(128, 0, 128, 255) 
+                }
+
+                sorted_sizes = sorted([str(s) for s in sizes], key=int)
+                crs_auth = dest_crs.authid()
+                cx, cy = point_transformed.x(), point_transformed.y()
+
+                for size_str in sorted_sizes:
+                    distance_m = float(size_str)
+                    line_color = color_map.get(size_str, QColor(150, 0, 255, 255))
+                    size_label = size_str
+
+                    half_size = distance_m / 2.0
+                    rect = QgsRectangle(cx - half_size, cy - half_size, cx + half_size, cy + half_size)
+                    square_geo = QgsGeometry.fromRect(rect)
+                    
+                    f_log.write(f"Creating layer Temp_Square_{size_label}m with CRS {crs_auth}...\n")
+                    temp_layer = QgsVectorLayer(f"Polygon?crs={crs_auth}", f"Temp_Square_{size_label}m", "memory")
+                    provider = temp_layer.dataProvider()
+                    
+                    feature = QgsFeature()
+                    feature.setGeometry(square_geo)
+                    provider.addFeatures([feature])
+                    
+                    symbol = temp_layer.renderer().symbol()
+                    stroke_symbol = QgsSimpleFillSymbolLayer()
+                    stroke_symbol.setFillColor(QColor(0, 0, 0, 0))
+                    stroke_symbol.setStrokeColor(line_color)
+                    stroke_symbol.setStrokeWidth(1.5)
+                    symbol.changeSymbolLayer(0, stroke_symbol)
+                    
+                    QgsProject.instance().addMapLayer(temp_layer)
+                    temp_layer.triggerRepaint()
+                    f_log.write(f"Layer Temp_Square_{size_label}m added successfully\n")
+
+                canvas.refresh()
+                f_log.write("Step 2 completed successfully\n")
+                
+                # 3. Open Controller Window and set active layer
+                f_log.write("Step 3: Running tool controller...\n")
+                self.run_tool()
+                f_log.write("Step 3 completed successfully\n")
+                
+            except Exception as ex:
+                tb = traceback.format_exc()
+                f_log.write(f"\n❌ CRITICAL EXCEPTION:\n{ex}\n{tb}\n")
+                print(f"[CryTerrainPlugin] execute_create_crop_boxes failed: {ex}")
+
